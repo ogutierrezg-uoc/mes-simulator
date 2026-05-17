@@ -29,8 +29,8 @@ tags:
     description: Creación, consulta y gestión del ciclo de vida de las OFs
   - name: Trazabilidad y producción
     description: Check-in, checkout e historial de piezas
-  - name: Piezas
-    description: Gestión de piezas — scrap y reparaciones
+  - name: Reparaciones
+    description: Registro de reparaciones y declaración de scrap
   - name: Stock
     description: Estado WIP/MAMA de piezas en tiempo real
   - name: Paradas
@@ -42,7 +42,7 @@ tags:
   - name: Usuarios y roles
     description: Gestión de usuarios, roles y permisos
   - name: Integración ERP
-    description: Endpoints de integración bidireccional con el ERP
+    description: Comunicación bidireccional con el ERP — recepción de órdenes de fabricación y envío de notificaciones de consumos, scraps y cierres
 
 paths:
 
@@ -380,7 +380,7 @@ paths:
   # ─── PIEZAS ──────────────────────────────────────────────────
   /piezas/{serial}/scrap:
     post:
-      tags: [Piezas]
+      tags: [Reparaciones]
       summary: Declarar pieza como scrap
       security: [{ bearerAuth: [] }]
       parameters:
@@ -408,7 +408,7 @@ paths:
 
   /piezas/{serial}/reparacion:
     post:
-      tags: [Piezas]
+      tags: [Reparaciones]
       summary: Registrar reparación de pieza
       security: [{ bearerAuth: [] }]
       parameters:
