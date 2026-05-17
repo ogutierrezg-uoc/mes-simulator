@@ -1,0 +1,1158 @@
+openapi: 3.0.3
+info:
+  title: MES API
+  description: |
+    API REST del sistema MES basado en arquitectura orientada a eventos.
+    Diseñado para la gestión de líneas de producción SMT en entornos industriales de bajo coste.
+    
+    **TFG — Ingeniería del Software · UOC**  
+    Autor: Óscar Gutiérrez González  
+    
+    Todos los endpoints requieren autenticación mediante token JWT en la cabecera 
+    `Authorization: Bearer {token}`, excepto `/auth/login`.
+    
+    El token JWT es generado y firmado por la propia MES API tras verificar las 
+    credenciales del usuario contra la base de datos. En peticiones posteriores, 
+    la API valida la firma del token criptográficamente sin consultar la base de datos.
+  version: 1.0.0
+  contact:
+    name: Óscar Gutiérrez González
+
+servers:
+  - url: https://mes-api.empresa.local/api/v1
+    description: Servidor MES (red local industrial)
+
+tags:
+  - name: Autenticación
+    description: Gestión de sesiones y tokens JWT
+  - name: Órdenes de fabricación
+    description: Creación, consulta y gestión del ciclo de vida de las OFs
+  - name: Trazabilidad y producción
+    description: Check-in, checkout e historial de piezas
+  - name: Piezas
+    description: Gestión de piezas — scrap y reparaciones
+  - name: Stock
+    description: Estado WIP/MAMA de piezas en tiempo real
+  - name: Paradas
+    description: Registro y gestión de paradas de producción
+  - name: OEE e informes
+    description: Indicadores de eficiencia y informes de producción
+  - name: Recetas
+    description: Gestión de recetas de fabricación por producto y estación
+  - name: Usuarios y roles
+    description: Gestión de usuarios, roles y permisos
+  - name: Integración ERP
+    description: Endpoints de integración bidireccional con el ERP
+
+paths:
+
+  # ─── AUTENTICACIÓN ───────────────────────────────────────────
+  /auth/login:
+    post:
+      tags: [Autenticación]
+      summary: Iniciar sesión
+      description: |
+        Verifica las credenciales del usuario contra la base de datos.
+        Si son correctas, la MES API genera y firma un token JWT con la clave
+        secreta del servidor y lo devuelve al cliente.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [login, password]
+              properties:
+                login:
+                  type: string
+                  example: operario01
+                password:
+                  type: string
+                  example: "********"
+      responses:
+        '200':
+          description: Login correcto
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                    description: Token JWT firmado por la MES API
+                  expiracion:
+                    type: string
+                    format: date-time
+                  usuario:
+                    $ref: '#/components/schemas/Usuario'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout:
+    post:
+      tags: [Autenticación]
+      summary: Cerrar sesión
+      description: |
+        Añade el token activo a la lista negra del servidor.
+        Cualquier petición posterior con ese token será rechazada aunque no haya expirado.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204':
+          description: Sesión cerrada correctamente
+
+  /auth/refresh:
+    post:
+      tags: [Autenticación]
+      summary: Renovar token JWT
+      description: |
+        Genera un nuevo token JWT con una nueva fecha de expiración.
+        El token anterior queda invalidado.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Nuevo token generado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  expiracion:
+                    type: string
+                    format: date-time
+
+  # ─── ÓRDENES DE FABRICACIÓN ──────────────────────────────────
+  /ordenes:
+    get:
+      tags: [Órdenes de fabricación]
+      summary: Listar órdenes de fabricación
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: estado
+          in: query
+          schema:
+            type: string
+            enum: [PENDIENTE, EN_PRODUCCION, FINALIZADA]
+        - name: producto_id
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Lista de órdenes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/OrdenFabricacion'
+    post:
+      tags: [Órdenes de fabricación]
+      summary: Crear orden de fabricación
+      description: |
+        Crea una nueva OF. El campo `origen` indica si la orden viene del ERP o
+        ha sido creada directamente en el MES. Cuando el origen es ERP, SAP envía
+        el payload completo con operaciones y BOM y la API responde con el código
+        correspondiente indicando si la orden se ha podido registrar correctamente.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrdenFabricacionInput'
+      responses:
+        '201':
+          description: Orden creada correctamente
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+                  nombre:
+                    type: string
+                    example: OF-005
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /ordenes/{nombre}:
+    get:
+      tags: [Órdenes de fabricación]
+      summary: Detalle de una orden
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/nombre'
+      responses:
+        '200':
+          description: Detalle de la orden con operaciones y BOM
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdenFabricacion'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /ordenes/{nombre}/iniciar:
+    put:
+      tags: [Órdenes de fabricación]
+      summary: Iniciar orden de fabricación
+      description: Cambia el estado a EN_PRODUCCION y envía recetas a las estaciones.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/nombre'
+      responses:
+        '200':
+          description: Orden iniciada correctamente
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /ordenes/{nombre}/finalizar:
+    put:
+      tags: [Órdenes de fabricación]
+      summary: Finalizar orden de fabricación
+      description: Cierra la orden bloqueando la asociación de nuevas piezas.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/nombre'
+      responses:
+        '200':
+          description: Orden finalizada correctamente
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /ordenes/{nombre}/piezas:
+    get:
+      tags: [Órdenes de fabricación]
+      summary: Piezas de una orden
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/nombre'
+      responses:
+        '200':
+          description: Lista de piezas con su estado actual
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Pieza'
+
+  # ─── TRAZABILIDAD Y PRODUCCIÓN ───────────────────────────────
+  /trazabilidad/checkin:
+    post:
+      tags: [Trazabilidad y producción]
+      summary: Registrar check-in de pieza
+      description: |
+        Registra la entrada de una pieza en una estación tras validar el interlocking.
+        Consumido internamente por la MES API al recibir el mensaje MQTT del broker.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serial, estacion_id, orden_nombre]
+              properties:
+                serial:
+                  type: string
+                  example: PCB-001-A
+                estacion_id:
+                  type: integer
+                  example: 3
+                orden_nombre:
+                  type: string
+                  example: OF-001
+      responses:
+        '201':
+          description: Check-in registrado correctamente
+        '409':
+          description: Interlocking activo — pieza bloqueada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /trazabilidad/checkout:
+    post:
+      tags: [Trazabilidad y producción]
+      summary: Registrar checkout de pieza
+      description: |
+        Registra la salida de una pieza con su resultado y datos de test.
+        
+        Si el resultado es OK y la operación es la última de la ruta, la MES API
+        transiciona automáticamente la pieza al estado MAMA sin intervención manual:
+        - Si es Cara A (CA): pieza pasa a MAMA como SEMI, disponible para proceso de Cara B.
+        - Si es Cara B (CB): pieza pasa a MAMA como FINISHED, producto terminado.
+        
+        En ambos casos la API genera automáticamente una notificación al ERP con
+        los consumos de BOM asociados.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serial, estacion_id, resultado]
+              properties:
+                serial:
+                  type: string
+                  example: PCB-001-A
+                estacion_id:
+                  type: integer
+                  example: 3
+                resultado:
+                  type: string
+                  enum: [OK, NOK]
+                datos:
+                  type: object
+                  description: Datos de medición específicos de la estación
+                  example:
+                    espesor_um: 182
+                    volumen_pct: 94
+                    area_pct: 97
+      responses:
+        '201':
+          description: Checkout registrado correctamente
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /trazabilidad/{serial}:
+    get:
+      tags: [Trazabilidad y producción]
+      summary: Historial completo de una pieza
+      description: |
+        Devuelve el historial completo de la pieza incluyendo todos los pasos
+        por estaciones, resultados, datos de test y reparaciones.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: serial
+          in: path
+          required: true
+          schema:
+            type: string
+          example: PCB-001-A
+      responses:
+        '200':
+          description: Historial completo de la pieza
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Trazabilidad'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /trazabilidad/{serial}/estado:
+    get:
+      tags: [Trazabilidad y producción]
+      summary: Estado actual de una pieza
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: serial
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Estado actual de la pieza
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  serial:
+                    type: string
+                  estado:
+                    type: string
+                    enum: [WIP, MAMA, BLOQUEADA, CONSUMIDO, SCRAP]
+                  proxima_operacion:
+                    type: string
+
+  # ─── PIEZAS ──────────────────────────────────────────────────
+  /piezas/{serial}/scrap:
+    post:
+      tags: [Piezas]
+      summary: Declarar pieza como scrap
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: serial
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [motivo]
+              properties:
+                motivo:
+                  type: string
+                  example: Defecto irreparable en AOI
+      responses:
+        '200':
+          description: Pieza declarada scrap correctamente
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /piezas/{serial}/reparacion:
+    post:
+      tags: [Piezas]
+      summary: Registrar reparación de pieza
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: serial
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tipo, resultado]
+              properties:
+                tipo:
+                  type: string
+                  example: Corrección pasta soldadura
+                descripcion:
+                  type: string
+                resultado:
+                  type: string
+                  enum: [OK, NOK]
+      responses:
+        '201':
+          description: Reparación registrada correctamente
+
+  # ─── STOCK ───────────────────────────────────────────────────
+  /stock:
+    get:
+      tags: [Stock]
+      summary: Estado WIP/MAMA de todas las piezas
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Estado de stock en tiempo real
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  wip:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Pieza'
+                  mama:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Pieza'
+                  bloqueadas:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Pieza'
+                  scrap:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Pieza'
+
+  /stock/mama/disponibles/{producto_base}:
+    get:
+      tags: [Stock]
+      summary: SEMIs de Cara A disponibles para Cara B
+      description: Lista los semiacabados de Cara A disponibles para iniciar proceso de Cara B.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: producto_base
+          in: path
+          required: true
+          schema:
+            type: string
+          example: PROD-001
+      responses:
+        '200':
+          description: Lista de SEMIs disponibles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Pieza'
+
+  # ─── PARADAS ─────────────────────────────────────────────────
+  /paradas:
+    get:
+      tags: [Paradas]
+      summary: Listar paradas
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: orden_nombre
+          in: query
+          schema:
+            type: string
+          example: OF-001
+        - name: activas
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Lista de paradas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Parada'
+    post:
+      tags: [Paradas]
+      summary: Registrar parada de producción
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orden_nombre, motivo]
+              properties:
+                orden_nombre:
+                  type: string
+                  example: OF-001
+                estacion_id:
+                  type: integer
+                motivo:
+                  type: string
+                  example: Avería de máquina
+      responses:
+        '201':
+          description: Parada registrada correctamente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Parada'
+
+  /paradas/{id}/finalizar:
+    put:
+      tags: [Paradas]
+      summary: Finalizar parada activa
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Parada cerrada con duración calculada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Parada'
+
+  # ─── OEE E INFORMES ──────────────────────────────────────────
+  /oee:
+    get:
+      tags: [OEE e informes]
+      summary: OEE de un periodo
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: fecha_desde
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          example: "2026-05-01T06:00:00"
+        - name: fecha_hasta
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          example: "2026-05-01T14:00:00"
+      responses:
+        '200':
+          description: Indicadores OEE calculados para el periodo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  disponibilidad:
+                    type: number
+                    example: 91.5
+                  rendimiento:
+                    type: number
+                    example: 87.3
+                  calidad:
+                    type: number
+                    example: 98.2
+                  oee:
+                    type: number
+                    example: 78.4
+                  tiempo_planificado_min:
+                    type: integer
+                    example: 480
+                  tiempo_paradas_min:
+                    type: integer
+                    example: 41
+
+  /informes/produccion:
+    get:
+      tags: [OEE e informes]
+      summary: Informe de producción
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: fecha_desde
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          example: "2026-05-01"
+        - name: fecha_hasta
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          example: "2026-05-31"
+        - name: orden_nombre
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Informe de producción por OF y periodo
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /informes/calidad:
+    get:
+      tags: [OEE e informes]
+      summary: Informe de calidad y defectos
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: fecha_desde
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          example: "2026-05-01"
+        - name: fecha_hasta
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          example: "2026-05-31"
+      responses:
+        '200':
+          description: Informe de defectos y scrap por estación y producto
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ─── RECETAS ─────────────────────────────────────────────────
+  /recetas:
+    get:
+      tags: [Recetas]
+      summary: Listar recetas
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: producto_id
+          in: query
+          schema:
+            type: integer
+        - name: estacion_id
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Lista de recetas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Receta'
+    post:
+      tags: [Recetas]
+      summary: Crear receta
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecetaInput'
+      responses:
+        '201':
+          description: Receta creada correctamente
+
+  /recetas/{id}:
+    get:
+      tags: [Recetas]
+      summary: Detalle de una receta
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Detalle de la receta con parámetros
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Receta'
+    put:
+      tags: [Recetas]
+      summary: Actualizar receta
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecetaInput'
+      responses:
+        '200':
+          description: Receta actualizada correctamente
+    delete:
+      tags: [Recetas]
+      summary: Eliminar receta
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '204':
+          description: Receta eliminada correctamente
+
+  # ─── USUARIOS Y ROLES ────────────────────────────────────────
+  /usuarios:
+    get:
+      tags: [Usuarios y roles]
+      summary: Listar usuarios
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Lista de usuarios
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Usuario'
+    post:
+      tags: [Usuarios y roles]
+      summary: Crear usuario
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UsuarioInput'
+      responses:
+        '201':
+          description: Usuario creado correctamente
+
+  /usuarios/{id}:
+    put:
+      tags: [Usuarios y roles]
+      summary: Modificar usuario
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UsuarioInput'
+      responses:
+        '200':
+          description: Usuario actualizado correctamente
+    delete:
+      tags: [Usuarios y roles]
+      summary: Desactivar usuario
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '204':
+          description: Usuario desactivado correctamente
+
+  /roles:
+    get:
+      tags: [Usuarios y roles]
+      summary: Listar roles
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Lista de roles con sus permisos
+
+  # ─── INTEGRACIÓN ERP ─────────────────────────────────────────
+  /erp/notificaciones:
+    get:
+      tags: [Integración ERP]
+      summary: Notificaciones pendientes para ERP
+      description: Lista las notificaciones generadas por el MES pendientes de envío al ERP.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Lista de notificaciones pendientes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NotificacionERP'
+
+  /erp/notificaciones/{id}/ack:
+    put:
+      tags: [Integración ERP]
+      summary: Confirmar recepción de notificación
+      description: El ERP confirma que ha recibido y procesado la notificación.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Confirmación registrada correctamente
+
+# ─── COMPONENTES ─────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Token JWT generado y firmado por la MES API tras verificar las credenciales
+        del usuario. Incluir en la cabecera: Authorization: Bearer {token}
+
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+    nombre:
+      name: nombre
+      in: path
+      required: true
+      description: Identificador de la orden de fabricación (ej. OF-001)
+      schema:
+        type: string
+      example: OF-001
+
+  responses:
+    BadRequest:
+      description: Datos incorrectos o incompletos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Token JWT no válido o expirado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Sin permisos para realizar esta operación
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Recurso no encontrado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Conflicto con el estado actual del sistema
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        codigo:
+          type: integer
+        mensaje:
+          type: string
+        detalle:
+          type: string
+
+    OrdenFabricacion:
+      type: object
+      properties:
+        id:
+          type: integer
+        nombre:
+          type: string
+          description: Identificador único de la orden
+          example: OF-001
+        producto_id:
+          type: integer
+        ruta_id:
+          type: integer
+        cantidad_obj:
+          type: integer
+        estado:
+          type: string
+          enum: [PENDIENTE, EN_PRODUCCION, FINALIZADA]
+        origen:
+          type: string
+          enum: [ERP, MES]
+          description: Indica si la orden fue creada desde el ERP o desde el propio MES
+        fecha_inicio:
+          type: string
+          format: date-time
+        fecha_fin:
+          type: string
+          format: date-time
+
+    OrdenFabricacionInput:
+      type: object
+      required: [nombre, producto_id, cantidad_obj, origen]
+      properties:
+        nombre:
+          type: string
+          example: OF-005
+        producto_id:
+          type: integer
+        cantidad_obj:
+          type: integer
+        origen:
+          type: string
+          enum: [ERP, MES]
+        referencia_erp:
+          type: string
+          description: Referencia interna del ERP (solo cuando origen=ERP)
+
+    Pieza:
+      type: object
+      properties:
+        id:
+          type: integer
+        serial:
+          type: string
+          example: PCB-001-A
+        orden_nombre:
+          type: string
+          example: OF-001
+        estado:
+          type: string
+          enum: [WIP, MAMA, BLOQUEADA, CONSUMIDO, SCRAP]
+        fecha_entrada:
+          type: string
+          format: date-time
+
+    Trazabilidad:
+      type: object
+      properties:
+        id:
+          type: integer
+        serial:
+          type: string
+        estacion_id:
+          type: integer
+        estacion_nombre:
+          type: string
+        operacion_nombre:
+          type: string
+        checkin:
+          type: string
+          format: date-time
+        checkout:
+          type: string
+          format: date-time
+        resultado:
+          type: string
+          enum: [OK, NOK]
+        datos:
+          type: object
+          description: Datos de medición específicos de la estación
+
+    Parada:
+      type: object
+      properties:
+        id:
+          type: integer
+        orden_nombre:
+          type: string
+          example: OF-001
+        estacion_id:
+          type: integer
+        motivo:
+          type: string
+        inicio:
+          type: string
+          format: date-time
+        fin:
+          type: string
+          format: date-time
+        duracion_min:
+          type: integer
+
+    Receta:
+      type: object
+      properties:
+        id:
+          type: integer
+        producto_id:
+          type: integer
+        estacion_id:
+          type: integer
+        version:
+          type: string
+        parametros:
+          type: object
+        activa:
+          type: boolean
+
+    RecetaInput:
+      type: object
+      required: [producto_id, estacion_id, version, parametros]
+      properties:
+        producto_id:
+          type: integer
+        estacion_id:
+          type: integer
+        version:
+          type: string
+        parametros:
+          type: object
+
+    NotificacionERP:
+      type: object
+      properties:
+        id:
+          type: integer
+        tipo:
+          type: string
+          enum: [PIEZA_OK, SCRAP, OF_FINALIZADA]
+        payload:
+          type: object
+          description: Contenido de la notificación según su tipo
+          oneOf:
+            - title: PIEZA_OK
+              type: object
+              properties:
+                serial:
+                  type: string
+                  example: PCB-001-A
+                orden:
+                  type: string
+                  example: OF-001
+                consumos_bom:
+                  type: array
+                  description: Consumos completos de la BOM de la orden
+                  items:
+                    $ref: '#/components/schemas/ConsumoNotificacion'
+            - title: SCRAP
+              type: object
+              properties:
+                serial:
+                  type: string
+                  example: PCB-002-A
+                orden:
+                  type: string
+                  example: OF-001
+                punto_fallo:
+                  type: string
+                  description: Estación donde se produjo el fallo
+                  example: SPI-L1
+                ultima_operacion:
+                  type: string
+                  example: Inspección pasta
+                consumos_parciales:
+                  type: array
+                  description: Solo los materiales consumidos hasta el punto de fallo
+                  items:
+                    $ref: '#/components/schemas/ConsumoNotificacion'
+            - title: OF_FINALIZADA
+              type: object
+              properties:
+                orden:
+                  type: string
+                  example: OF-001
+                motivo:
+                  type: string
+                  enum: [OBJETIVO_ALCANZADO, CIERRE_MANUAL]
+        timestamp:
+          type: string
+          format: date-time
+        enviada:
+          type: boolean
+        intentos:
+          type: integer
+
+    ConsumoNotificacion:
+      type: object
+      description: Material consumido a notificar al ERP
+      properties:
+        material_ref:
+          type: string
+          description: Referencia del material en el sistema
+          example: MAT-PAS-001
+        descripcion:
+          type: string
+          example: Pasta de soldadura Sn96
+        cantidad:
+          type: number
+          example: 0.48
+        unidad:
+          type: string
+          example: gr
+
+    Usuario:
+      type: object
+      properties:
+        id:
+          type: integer
+        nombre:
+          type: string
+        apellidos:
+          type: string
+        login:
+          type: string
+        rol_id:
+          type: integer
+        activo:
+          type: boolean
+
+    UsuarioInput:
+      type: object
+      required: [nombre, apellidos, login, rol_id]
+      properties:
+        nombre:
+          type: string
+        apellidos:
+          type: string
+        login:
+          type: string
+        password:
+          type: string
+        rol_id:
+          type: integer
