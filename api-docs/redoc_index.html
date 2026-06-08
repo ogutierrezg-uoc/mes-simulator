@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <title>MES API · Documentación</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+      body { margin: 0; padding: 0; font-family: Inter, sans-serif; }
+      .header { background: linear-gradient(135deg, #1F3864, #2E75B6); color: white; padding: 20px 40px; display: flex; align-items: center; gap: 16px; }
+      .header h1 { margin: 0; font-size: 22px; font-weight: 700; }
+      .header p { margin: 4px 0 0 0; font-size: 13px; opacity: 0.8; }
+      .badge { background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.4); border-radius: 20px; padding: 4px 12px; font-size: 12px; font-weight: 600; margin-left: auto; }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div>
+        <h1>MES API · Sistema MES orientado a eventos</h1>
+        <p>TFG Ingeniería del Software · UOC · Óscar Gutiérrez González</p>
+      </div>
+      <div class="badge">v1.0.0</div>
+    </div>
+    <redoc spec-url='openapi.yaml'></redoc>
+    <script src="https://cdn.jsdelivr.net/npm/redoc@2.1.3/bundles/redoc.standalone.js"></script>
+  </body>
+</html>
